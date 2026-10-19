@@ -176,24 +176,29 @@ class UserProfileManager:
                 }
                 for s in self.db.get_user_schedule(user.id)
             ],
-            "meal_schedule": [
-                {
-                    "id": m.id,
-                    "meal_type": m.meal_type,
-                    "time": m.time,
-                    "reminder_offset_minutes": m.reminder_offset_minutes
-                }
-                for m in self.db.get_user_meal_schedule(user.id)
-            ],
+            "meal_schedule": self._meal_schedule_dicts(user.id),
             "settings": self._get_settings_dict(user.id)
         }
     
+    def _meal_schedule_dicts(self, user_id: int) -> List[Dict[str, Any]]:
+        """Read meal schedule after the database session has closed."""
+        meals = self.db.get_user_meal_schedule(user_id)
+        return [
+            {
+                "id": m.id,
+                "meal_type": m.meal_type,
+                "time": m.time,
+                "reminder_offset_minutes": m.reminder_offset_minutes
+            }
+            for m in meals
+        ]
+
     def _get_settings_dict(self, user_id: int) -> Dict[str, Any]:
         """Get user settings as dictionary."""
         settings = self.db.get_user_settings(user_id)
         if not settings:
             return {}
-        
+
         return {
             "enable_meal_reminders": settings.enable_meal_reminders,
             "enable_supplement_reminders": settings.enable_supplement_reminders,

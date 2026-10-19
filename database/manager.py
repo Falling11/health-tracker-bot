@@ -6,7 +6,6 @@ Handles database initialization, sessions, and CRUD operations.
 from contextlib import contextmanager
 from typing import Optional, Generator
 from sqlalchemy.orm import Session
-from sqlalchemy import inspect
 
 from config import config
 from database.models import (

@@ -691,7 +691,7 @@ def get_engine(database_url: str, echo: bool = False):
 
 def get_session_factory(engine):
     """Create session factory."""
-    return sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    return sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
 
 def init_db(engine):

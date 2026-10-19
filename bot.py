@@ -351,8 +351,11 @@ class HealthBot:
         profile = profile_manager.get_user_profile(telegram_id)
         
         # Calculate BMI
-        bmi_data = profile_manager.calculate_bmi(user.weight_kg, user.height_cm)
-        
+        bmi_data = health_manager.calculate_bmi(user.weight_kg, user.height_cm) or {
+            "bmi": "—",
+            "category": "нет данных",
+        }
+
         # Calculate calorie targets
         calorie_data = profile_manager.calculate_daily_calories(user)
         
