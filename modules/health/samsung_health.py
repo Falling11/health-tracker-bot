@@ -23,7 +23,9 @@ class SamsungHealthIntegration:
         if self.is_available:
             logger.info("Samsung Health integration initialized")
         else:
-            logger.warning("Samsung Health credentials not configured")
+            logger.info(
+                "Samsung Health API credentials not set; screenshot import still works"
+            )
     
     async def sync_health_data(
         self,

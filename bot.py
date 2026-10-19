@@ -35,6 +35,31 @@ from modules.analytics import report_generator
 from modules.integrations import deepseek_client
 from utils.image_processor import image_processor
 
+class TelegramTokenRedactFilter(logging.Filter):
+    """Replace the Telegram bot token in log messages and arguments."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        token = config.telegram_bot_token
+        if not token:
+            return True
+
+        def redact(value):
+            if isinstance(value, str):
+                return value.replace(token, "***") if token in value else value
+            text = str(value)
+            if token in text:
+                return text.replace(token, "***")
+            return value
+
+        if isinstance(record.msg, str):
+            record.msg = redact(record.msg)
+        if isinstance(record.args, dict):
+            record.args = {key: redact(value) for key, value in record.args.items()}
+        elif isinstance(record.args, tuple):
+            record.args = tuple(redact(value) for value in record.args)
+        return True
+
+
 # Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -44,13 +69,44 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+_token_filter = TelegramTokenRedactFilter()
+logging.getLogger().addFilter(_token_filter)
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_token_filter)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
-# Conversation states
-ONBOARDING = range(15)
+# Conversation states. One state per onboarding step, including "complete".
+ONBOARDING = range(len(OnboardingHandler.STEPS))
 FOOD_EDIT = range(5)
 MANUAL_HEALTH_INPUT = range(10)
+
+MENU_TODAY = "📊 Сегодня"
+MENU_WEEK = "📈 Неделя"
+MENU_NUTRITION = "🍽️ Питание"
+MENU_TRAINING = "💪 Тренировка"
+MENU_HEALTH = "❤️ Здоровье"
+MENU_SETTINGS = "⚙️ Настройки"
+MENU_PROFILE = "👤 Профиль"
+MENU_BUTTONS = {
+    MENU_TODAY,
+    MENU_WEEK,
+    MENU_NUTRITION,
+    MENU_TRAINING,
+    MENU_HEALTH,
+    MENU_SETTINGS,
+    MENU_PROFILE,
+}
+
+
+def onboarding_state(step_index: int):
+    """Return the conversation state for an onboarding step."""
+    if 0 <= step_index < len(ONBOARDING):
+        return ONBOARDING[step_index]
+    logger.error("Onboarding step index %s is outside conversation states", step_index)
+    return ConversationHandler.END
 
 
 class HealthBot:
@@ -333,19 +389,12 @@ class HealthBot:
             reply_markup=reply_markup
         )
     
-    async def cmd_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /settings command."""
-        telegram_id = str(update.effective_user.id)
-        user = profile_manager.check_existing_user(telegram_id)
-        
-        if not user:
-            await update.message.reply_text("❌ Профиль не найден")
-            return
-        
+    def build_settings_message(self, user) -> tuple:
+        """Build the settings screen text and keyboard."""
         settings = db_manager.get_user_settings(user.id)
-        
+
         settings_text = "⚙️ <b>Настройки</b>\n\n"
-        
+
         if settings:
             settings_text += f"""
 🔔 <b>Уведомления:</b>
@@ -358,14 +407,24 @@ class HealthBot:
 • DeepSeek: {'✅' if settings.deepseek_enabled else '❌'}
 • Gemini: {'✅' if settings.gemini_enabled else '❌'}
 """
-        
+
         keyboard = [
             [InlineKeyboardButton("🔔 Уведомления", callback_data="settings_notifications")],
             [InlineKeyboardButton("🤖 AI настройки", callback_data="settings_ai")],
             [InlineKeyboardButton("📱 Samsung Health", callback_data="settings_samsung")]
         ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
+        return settings_text, InlineKeyboardMarkup(keyboard)
+
+    async def cmd_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /settings command."""
+        telegram_id = str(update.effective_user.id)
+        user = profile_manager.check_existing_user(telegram_id)
+
+        if not user:
+            await update.message.reply_text("❌ Профиль не найден")
+            return
+
+        settings_text, reply_markup = self.build_settings_message(user)
         await update.message.reply_text(
             settings_text,
             parse_mode=ParseMode.HTML,
@@ -510,19 +569,25 @@ class HealthBot:
             reply_markup=ReplyKeyboardRemove()
         )
         
-        return ONBOARDING[0]
+        return onboarding_state(0)
     
     async def onboard_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle onboarding responses."""
         telegram_id = str(update.effective_user.id)
         onboarding = get_or_create_onboarding_session(telegram_id)
         
-        answer = update.message.text
+        answer = update.message.text or ""
+        if answer.strip() in MENU_BUTTONS:
+            await update.message.reply_text(
+                "Сначала закончите настройку или нажмите /cancel."
+            )
+            return onboarding_state(onboarding.current_step_index)
+
         success, error = onboarding.process_answer(answer)
         
         if not success:
             await update.message.reply_text(f"❌ {error}\n\nПопробуйте еще раз:")
-            return ONBOARDING[onboarding.STEPS.index(onboarding.get_current_step())]
+            return onboarding_state(onboarding.current_step_index)
         
         if onboarding.is_onboarding_complete():
             # Create user profile
@@ -556,9 +621,7 @@ class HealthBot:
         # Next question
         next_question = onboarding.get_question()
         await update.message.reply_text(next_question)
-        
-        current_step = onboarding.STEPS.index(onboarding.get_current_step())
-        return ONBOARDING[current_step]
+        return onboarding_state(onboarding.current_step_index)
     
     async def onboard_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle onboarding callback queries."""
@@ -572,7 +635,7 @@ class HealthBot:
             question = onboarding.get_question()
             await query.edit_message_text(question)
             
-            return ONBOARDING[0]
+            return onboarding_state(0)
         
         return ConversationHandler.END
 
@@ -756,18 +819,20 @@ class HealthBot:
         text = update.message.text.strip()
         
         # Handle main keyboard buttons
-        if text == "📊 Сегодня":
+        if text == MENU_TODAY:
             await self.cmd_today(update, context)
-        elif text == "📈 Неделя":
+        elif text == MENU_WEEK:
             await self.cmd_week(update, context)
-        elif text == "🍽️ Питание":
+        elif text == MENU_NUTRITION:
             await update.message.reply_text("🍽️ Раздел питания\n\nИспользуйте команды:\n/food - добавить еду\n/photo - отправить фото еды")
-        elif text == "💪 Тренировка":
+        elif text == MENU_TRAINING:
             await update.message.reply_text("💪 Раздел тренировок\n\nИспользуйте команду /workout для начала тренировки")
-        elif text == "❤️ Здоровье":
+        elif text == MENU_HEALTH:
             await update.message.reply_text("❤️ Раздел здоровья\n\nИспользуйте команду /health для ввода показателей")
-        elif text == "⚙️ Настройки":
+        elif text == MENU_SETTINGS:
             await self.cmd_settings(update, context)
+        elif text == MENU_PROFILE:
+            await self.cmd_profile(update, context)
         else:
             # Unknown command - show help
             await self.cmd_help(update, context)
@@ -884,6 +949,15 @@ class HealthBot:
             return
         
         settings = db_manager.get_user_settings(user.id)
+
+        if setting_type == "main":
+            settings_text, reply_markup = self.build_settings_message(user)
+            await update.callback_query.message.reply_text(
+                settings_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=reply_markup
+            )
+            return
         
         if setting_type == "notifications":
             # Toggle notifications
@@ -906,11 +980,14 @@ class HealthBot:
                 )
         
         elif setting_type == "samsung":
-            samsung_state = samsung_integration.is_connected()
-            await update.callback_query.message.reply_text(
-                f"📱 Samsung Health: {'✅ подключен' if samsung_state else '❌ не подключен'}\n\n"
-                f"Для подключения настройте API ключ в .env"
-            )
+            if samsung_integration.is_connected():
+                samsung_text = "📱 Samsung Health: ✅ API подключен"
+            else:
+                samsung_text = (
+                    "📱 Samsung Health: API-ключ не задан.\n\n"
+                    "Это необязательно. Данные можно присылать скриншотами из приложения."
+                )
+            await update.callback_query.message.reply_text(samsung_text)
     
     async def handle_stats_callback(
         self,
@@ -1111,9 +1188,10 @@ class HealthBot:
     def get_main_keyboard(self) -> ReplyKeyboardMarkup:
         """Get main keyboard."""
         keyboard = [
-            ["📊 Сегодня", "📈 Неделя"],
-            ["🍽️ Питание", "💪 Тренировка"],
-            ["❤️ Здоровье", "⚙️ Настройки"]
+            [MENU_TODAY, MENU_WEEK],
+            [MENU_NUTRITION, MENU_TRAINING],
+            [MENU_HEALTH, MENU_SETTINGS],
+            [MENU_PROFILE],
         ]
         return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
