@@ -36,7 +36,9 @@ class DatabaseBackup:
             retention_days: Number of days to keep backups
             compress: Compress backups with gzip
         """
-        self.db_path = Path(db_path) if db_path else Path(config.BASE_DIR) / "health_bot.db"
+        self.db_path = Path(db_path) if db_path else (
+            config.sqlite_db_path or (Path(config.DATA_DIR) / "health_bot.db")
+        )
         self.backup_dir = backup_dir or BACKUPS_DIR
         self.retention_days = retention_days
         self.compress = compress

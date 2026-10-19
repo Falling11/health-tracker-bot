@@ -4,6 +4,8 @@ Handles all configuration settings, API keys, and environment variables.
 """
 
 import os
+import shutil
+import sqlite3
 from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
@@ -23,8 +25,62 @@ BACKUPS_DIR = DATA_DIR / "backups"
 for directory in [DATA_DIR, USERS_DIR, REPORTS_DIR, BACKUPS_DIR]:
     directory.mkdir(parents=True, exist_ok=True)
 
-# Database
-DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{BASE_DIR / 'health_bot.db'}")
+# Database. SQLite lives under data/ so the Docker volume keeps it across rebuilds.
+DEFAULT_DB_PATH = DATA_DIR / "health_bot.db"
+LEGACY_DB_PATH = BASE_DIR / "health_bot.db"
+
+
+def sqlite_path_from_url(url: str) -> Optional[Path]:
+    """Return the file path for a SQLite URL, or None for other databases."""
+    prefix = "sqlite:///"
+    if not url.startswith(prefix):
+        return None
+    raw = url[len(prefix):]
+    if raw in ("", ":memory:"):
+        return None
+    path = Path(raw)
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path.resolve()
+
+
+def sqlite_url_for(path: Path) -> str:
+    """Build a SQLite URL for an absolute filesystem path."""
+    return "sqlite:///" + path.resolve().as_posix()
+
+
+def _migrate_legacy_sqlite(target: Path) -> None:
+    """Copy the old database from the image filesystem into the persisted data directory."""
+    legacy = LEGACY_DB_PATH.resolve()
+    destination = target.resolve()
+    if destination.exists() or not legacy.exists() or legacy == destination:
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with sqlite3.connect(legacy) as source, sqlite3.connect(destination) as copied:
+            source.backup(copied)
+    except sqlite3.Error:
+        shutil.copy2(legacy, destination)
+
+
+def resolve_database_url() -> str:
+    """Use data/health_bot.db unless another database URL is configured."""
+    env_url = os.getenv("DATABASE_URL", "").strip()
+    if not env_url:
+        _migrate_legacy_sqlite(DEFAULT_DB_PATH)
+        return sqlite_url_for(DEFAULT_DB_PATH)
+
+    configured_path = sqlite_path_from_url(env_url)
+    if configured_path is None:
+        return env_url
+    if configured_path == LEGACY_DB_PATH.resolve():
+        _migrate_legacy_sqlite(DEFAULT_DB_PATH)
+        return sqlite_url_for(DEFAULT_DB_PATH)
+    return env_url
+
+
+DATABASE_URL = resolve_database_url()
+SQLITE_DB_PATH = sqlite_path_from_url(DATABASE_URL)
 
 # Telegram Bot
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -79,6 +135,7 @@ class Config:
         self.samsung_health_user_id = SAMSUNG_HEALTH_USER_ID
         self.foodscanner_api_url = FOODSCANNER_API_URL
         self.database_url = DATABASE_URL
+        self.sqlite_db_path = SQLITE_DB_PATH
         self.timezone = TIMEZONE
         self.language = LANGUAGE
         self.log_level = LOG_LEVEL

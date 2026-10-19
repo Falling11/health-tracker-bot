@@ -26,13 +26,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy project files
 COPY . .
 
+# Persisted data directory. The Compose volume mounts over /app/data.
+RUN mkdir -p /app/data/users /app/data/reports /app/data/backups /app/data/uploads
+
 # Create non-root user for security
 RUN useradd --create-home --shell /bin/bash appuser && \
     chown -R appuser:appuser /app
 USER appuser
-
-# Create data directories
-RUN mkdir -p /app/data/users /app/data/reports /app/data/backups /app/data/uploads
 
 # Expose port (if using webhooks)
 EXPOSE 8000
